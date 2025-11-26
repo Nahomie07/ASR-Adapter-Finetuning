@@ -11,7 +11,7 @@ def build_mini_dataset(n_samples, output_dir="data"):
     os.makedirs(audio_dir, exist_ok=True)
 
     print(f"📥 Chargement du dataset via HuggingFace (train split)...")
-    dataset = load_dataset("DigitalUmuganda/ASR_Fellowship_Challenge_Dataset", split="train")
+    dataset = load_dataset("DigitalUmuganda/ASR_Fellowship_Challenge_Dataset")
 
     print(f"➡️ Dataset chargé. Total samples disponibles: {len(dataset)}")
 
