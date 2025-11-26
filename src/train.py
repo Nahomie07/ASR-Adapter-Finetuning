@@ -1,14 +1,19 @@
+
+from torch.optim import AdamW 
+
+import os
+import json
 import torch
-from torch.utils.data import IterableDataset, DataLoader
-from datasets import load_dataset
+from torch.utils.data import DataLoader
+from transformers import  get_linear_schedule_with_warmup
 from hf_utils import load_whisper_model
 from adapters import inject_adapters_whisper
 from dataset import prepare_dataset
 from utils import set_seed
-from torch.optim import AdamW 
-from transformers import get_linear_schedule_with_warmup
+from datasets import Dataset
 from tqdm import tqdm
 import argparse
+
 def freeze_base_model(model):
     for _, p in model.named_parameters():
         p.requires_grad = False
@@ -31,62 +36,77 @@ def collate_fn(batch):
 
     return {"input_features": input_feats, "labels": labels}
 
+
+def load_local_dataset(data_dir):
+    """Charge le mini dataset local téléchargé manuellement."""
+    
+    meta_path = os.path.join(data_dir, "metadata.jsonl")
+    audio_dir = os.path.join(data_dir, "audio")
+
+    assert os.path.exists(meta_path), "metadata.jsonl introuvable"
+    assert os.path.exists(audio_dir), "dossier audio introuvable"
+
+    samples = []
+    with open(meta_path, "r", encoding="utf-8") as f:
+        for line in f:
+            s = json.loads(line)
+            # Ré-écrire le chemin local à la place du chemin HuggingFace
+            filename = os.path.basename(s["audio"]["path"])
+            s["audio"]["path"] = os.path.join(audio_dir, filename)
+            samples.append(s)
+
+    return Dataset.from_list(samples)
+
+
 def train(args):
 
-    # 🔹 Fix random seed
     set_seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # 🔹 Load Whisper-small + processor
+    # Load Whisper-small + tokenizer/processor
     processor, model = load_whisper_model(args.model_name, device=device)
 
-    # 🔹 Freeze full model
+    # Freeze base model
     freeze_base_model(model)
 
-    # 🔹 Inject adapters
-    insert_list = inject_adapters_whisper(
+    # Inject adapters
+    inserted = inject_adapters_whisper(
         model, bottleneck_dim=args.bottleneck_dim, scale=args.scale
     )
-    print(f"Inserted {len(insert_list)} adapters.")
+    print(f"Inserted {len(inserted)} adapters.")
 
-    # 🔹 Train adapters only
+    # Train adapters only
     unfreeze_adapters(model)
 
-    # -----------------------------------------
-    #         LOAD SMALL DATASET (KAGGLE)
-    # -----------------------------------------
-    print("Loading dataset (train)...")
-    ds = load_dataset("DigitalUmuganda/ASR_Fellowship_Challenge_Dataset", split="train")
+    # ================================================================
+    #               CHARGEMENT DU MINI DATASET LOCAL
+    # ================================================================
+    dataset = load_local_dataset(args.data_dir)
+    print(f"Dataset local chargé : {len(dataset)} échantillons.")
 
-    # 🔥 IMPORTANT : sample léger pour Kaggle
-    train_ds = ds.shuffle(seed=42).select(range(args.train_size))
-    print(f"Train subset size: {len(train_ds)} samples")
-
-    # 🔹 Preprocessing function
+    # ================================================================
+    #                     PRÉPROCESSING (HF)
+    # ================================================================
     def map_fn(x):
         return prepare_dataset(x, processor)
 
-    # 🔹 Avoid error: remove columns properly
-    columns_to_remove = list(train_ds.features.keys())
-
-    train_ds = train_ds.map(
+    dataset = dataset.map(
         map_fn,
-        remove_columns=columns_to_remove,
-        desc="Preparing dataset"
+        remove_columns=dataset.column_names,
+        desc="Préparation dataset"
     )
 
-    # 🔹 Build DataLoader
+    # DataLoader
     dataloader = DataLoader(
-        train_ds,
+        dataset,
         batch_size=args.batch_size,
         shuffle=True,
         collate_fn=collate_fn,
     )
 
-    # 🔹 Collect adapter weights only
+    # Optimizer
     trainable = [p for p in model.parameters() if p.requires_grad]
-    num_trainable = sum(p.numel() for p in trainable)
-    print("Trainable parameters:", num_trainable)
+    print("Paramètres entraînables :", sum(p.numel() for p in trainable))
 
     optimizer = AdamW(trainable, lr=args.lr)
 
@@ -100,9 +120,9 @@ def train(args):
     model.train()
     model.to(device)
 
-    # -----------------------------------------
-    #                TRAINING LOOP
-    # -----------------------------------------
+    # ================================================================
+    #                       TRAIN LOOP
+    # ================================================================
     for epoch in range(args.num_epochs):
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
 
@@ -110,7 +130,10 @@ def train(args):
             input_feats = batch["input_features"].to(device)
             labels = batch["labels"].to(device)
 
-            outputs = model(input_features=input_feats, labels=labels)
+            outputs = model(
+                input_features=input_feats,
+                labels=labels
+            )
             loss = outputs.loss
 
             loss.backward()
@@ -120,24 +143,26 @@ def train(args):
 
             pbar.set_postfix({"loss": loss.item()})
 
-    # -----------------------------------------
-    #            SAVE ADAPTER WEIGHTS
-    # -----------------------------------------
+    # ================================================================
+    #               SAVE ADAPTER WEIGHTS
+    # ================================================================
+    os.makedirs(args.adapter_dir, exist_ok=True)
+
     adapter_state = {
         n: p.detach().cpu()
         for n, p in model.named_parameters()
         if p.requires_grad
     }
 
-    os.makedirs(args.adapter_dir, exist_ok=True)
     save_path = os.path.join(args.adapter_dir, "adapter_weights.pth")
-
     torch.save(adapter_state, save_path)
-    print("Adapters saved to:", save_path)
+
+    print("Adaptateurs enregistrés dans :", save_path)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--data_dir", default="data")   # 🔥 ton dataset local
     parser.add_argument("--model_name", default="openai/whisper-small")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--num_epochs", type=int, default=2)
@@ -145,8 +170,7 @@ if __name__ == "__main__":
     parser.add_argument("--bottleneck_dim", type=int, default=64)
     parser.add_argument("--scale", type=float, default=1.0)
     parser.add_argument("--adapter_dir", default="/kaggle/working")
-    parser.add_argument("--train_size", type=int, default=500)
     parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
 
+    args = parser.parse_args()
     train(args)
