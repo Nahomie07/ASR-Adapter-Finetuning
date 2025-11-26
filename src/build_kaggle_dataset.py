@@ -6,56 +6,54 @@ import argparse
 
 """
 ====================================================
-   BUILD MINI DATASET FOR KAGGLE (DOCUMENTED)
+   BUILD MINI DATASET FOR KAGGLE (FINAL + WORKING)
 ====================================================
 
-Ce script permet de créer un jeu de données local à 
-partir du dataset ASR Fellowship Challenge *sans*
-télécharger les ~57 Go du dataset complet.
+Télécharge seulement N échantillons du dataset
+Digital Umuganda ASR Fellowship Challenge sans
+récupérer les 57 Go complets.
 
-Il télécharge uniquement les N premières lignes du 
-fichier metadata.jsonl + les fichiers audio associés.
-
-Structure générée :
-    data/
-      ├── metadata.jsonl
-      └── audio/
-            ├── xxxx.wav
-            ├── yyyy.wav
-
-Ce dataset local est compatible avec le train.py corrigé 
-et n'utilise qu'une fraction de l'espace disque Kaggle.
+Fonctionne dans Kaggle.
 """
 
 
-def download_metadata(index_url, n):
+# ----------------------------------------------------------- #
+#     URL DIRECTE QUI FONCTIONNE (non-LFS, non-HTML)          #
+# ----------------------------------------------------------- #
+METADATA_URL = (
+    "https://huggingface.co/datasets/DigitalUmuganda/"
+    "ASR_Fellowship_Challenge_Dataset/resolve/main/data/train/metadata.jsonl?download=1"
+)
+
+
+def download_metadata(n):
     print(f"📥 Téléchargement des {n} entrées metadata...")
 
     samples = []
-    with requests.get(index_url, stream=True, headers={"Accept": "application/json"}) as r:
-        for raw_line in r.iter_lines(decode_unicode=True):
-            if not raw_line:
-                continue
+    r = requests.get(METADATA_URL, stream=True)
 
-            if not raw_line.startswith("{"):  # Évite HTML ou lignes vides
-                continue
+    for raw in r.iter_lines(decode_unicode=True):
+        if not raw:
+            continue
 
-            try:
-                sample = json.loads(raw_line)
-            except json.JSONDecodeError:
-                continue  # ignore mauvaise ligne
+        # On ignore tout ce qui n’est pas JSON
+        if not raw.strip().startswith("{"):
+            continue
 
-            samples.append(sample)
-            if len(samples) >= n:
-                break
+        try:
+            sample = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
 
+        samples.append(sample)
+        if len(samples) >= n:
+            break
+
+    print(f"➡️  {len(samples)} entrées valides récupérées.")
     return samples
 
 
 def download_audio(samples, audio_dir):
-    """
-    Télécharge les fichiers audio correspondant aux échantillons.
-    """
     print("🎧 Téléchargement des fichiers audio...")
 
     os.makedirs(audio_dir, exist_ok=True)
@@ -65,26 +63,22 @@ def download_audio(samples, audio_dir):
         local_name = os.path.basename(url)
         out_path = os.path.join(audio_dir, local_name)
 
-        # Skip si déjà téléchargé
         if os.path.exists(out_path):
+            s["audio"]["path"] = out_path
             continue
 
         r = requests.get(url, stream=True)
         with open(out_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=8192):
+            for chunk in r.iter_content(8192):
                 if chunk:
                     f.write(chunk)
 
-        # Remplace le chemin HF par le chemin local
         s["audio"]["path"] = out_path
 
     return samples
 
 
 def save_metadata(samples, output_path):
-    """
-    Enregistre les métadonnées finales (avec chemins audio locaux).
-    """
     with open(output_path, "w", encoding="utf-8") as f:
         for s in samples:
             f.write(json.dumps(s, ensure_ascii=False) + "\n")
@@ -93,35 +87,29 @@ def save_metadata(samples, output_path):
 
 
 def main(args):
-    # URLs officielles du dataset DigitalUmuganda
-    index_url = (
-        "https://huggingface.co/datasets/DigitalUmuganda/"
-        "ASR_Fellowship_Challenge_Dataset/resolve/main/data/train/metadata.jsonl"
-    )
-
     data_dir = args.data_dir
     audio_dir = os.path.join(data_dir, "audio")
     os.makedirs(data_dir, exist_ok=True)
 
-    # Étape 1 : Télécharger N lignes du metadata.jsonl
-    samples = download_metadata(index_url, args.n)
+    # 1) Télécharger N lignes du metadata.jsonl
+    samples = download_metadata(args.n)
 
-    # Étape 2 : Télécharger seulement les audios correspondants
+    # 2) Télécharger les audios
     samples = download_audio(samples, audio_dir)
 
-    # Étape 3 : Sauvegarder metadata.jsonl local
+    # 3) Sauvegarder metadata.jsonl local
     metadata_path = os.path.join(data_dir, "metadata.jsonl")
     save_metadata(samples, metadata_path)
 
     print("✅ Mini dataset complet et prêt pour l'entraînement !")
     print(f"📁 Dossier : {data_dir}")
-    print(f"📦 Nombre d'échantillons : {len(samples)}")
+    print(f"📦 Nombre d'échantillons finaux : {len(samples)}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--n", type=int, default=300,
-                        help="Nombre d'échantillons à télécharger (défaut=300)")
+                        help="Nombre d'échantillons à télécharger")
     parser.add_argument("--data_dir", default="data",
                         help="Dossier de sortie du dataset local")
     args = parser.parse_args()
