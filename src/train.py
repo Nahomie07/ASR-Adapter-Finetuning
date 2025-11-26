@@ -1,176 +1,143 @@
-
-from torch.optim import AdamW 
-
 import os
-import json
 import torch
 from torch.utils.data import DataLoader
-from transformers import  get_linear_schedule_with_warmup
+from torch.optim import AdamW
+from transformers import get_linear_schedule_with_warmup
 from hf_utils import load_whisper_model
 from adapters import inject_adapters_whisper
 from dataset import prepare_dataset
 from utils import set_seed
-from datasets import Dataset
-from tqdm import tqdm
+from tqdm.auto import tqdm
+import json
 import argparse
 
+# ------------------------
+# Fonctions utilitaires
+# ------------------------
 def freeze_base_model(model):
-    for _, p in model.named_parameters():
+    for p in model.parameters():
         p.requires_grad = False
 
 def unfreeze_adapters(model):
     for name, p in model.named_parameters():
-        if "adapter" in name:
+        if "adapter" in name or ".adapter" in name:
             p.requires_grad = True
 
 def collate_fn(batch):
     input_feats = [torch.tensor(b["input_features"]) for b in batch]
     labels = [torch.tensor(b["labels"]) for b in batch]
-
-    input_feats = torch.nn.utils.rnn.pad_sequence(
-        input_feats, batch_first=True, padding_value=0.0
-    )
-    labels = torch.nn.utils.rnn.pad_sequence(
-        labels, batch_first=True, padding_value=-100
-    )
-
+    input_feats = torch.nn.utils.rnn.pad_sequence(input_feats, batch_first=True, padding_value=0.0)
+    labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=-100)
     return {"input_features": input_feats, "labels": labels}
 
-
-def load_local_dataset(data_dir):
-    """Charge le mini dataset local téléchargé manuellement."""
-    
-    meta_path = os.path.join(data_dir, "metadata.jsonl")
-    audio_dir = os.path.join(data_dir, "audio")
-
-    assert os.path.exists(meta_path), "metadata.jsonl introuvable"
-    assert os.path.exists(audio_dir), "dossier audio introuvable"
-
+def load_local_dataset(dataset_path, processor, n_samples=None):
+    """Charge le dataset local et prépare les features"""
     samples = []
-    with open(meta_path, "r", encoding="utf-8") as f:
+    with open(dataset_path, "r", encoding="utf-8") as f:
         for line in f:
-            s = json.loads(line)
-            # Ré-écrire le chemin local à la place du chemin HuggingFace
-            filename = os.path.basename(s["audio"]["path"])
-            s["audio"]["path"] = os.path.join(audio_dir, filename)
-            samples.append(s)
+            sample = json.loads(line)
+            sample = prepare_dataset(sample, processor)
+            samples.append(sample)
+            if n_samples and len(samples) >= n_samples:
+                break
+    return samples
 
-    return Dataset.from_list(samples)
+def generate_transcriptions(model, processor, dataset, device):
+    """Génère des transcriptions à partir du modèle et du dataset"""
+    model.eval()
+    model.to(device)
+    results = []
+    for sample in tqdm(dataset):
+        input_feats = torch.tensor(sample["input_features"]).unsqueeze(0).to(device)
+        with torch.no_grad():
+            outputs = model.generate(input_features=input_feats)
+        transcription = processor.batch_decode(outputs)[0]
+        results.append(transcription)
+    return results
 
+def save_to_file(transcriptions, path):
+    with open(path, "w", encoding="utf-8") as f:
+        for t in transcriptions:
+            f.write(t + "\n")
+    print(f"Saved to {path}")
 
+# ------------------------
+# Fonction principale
+# ------------------------
 def train(args):
-
     set_seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Load Whisper-small + tokenizer/processor
-    processor, model = load_whisper_model(args.model_name, device=device)
-
-    # Freeze base model
+    # 1️⃣ Charger le modèle de base
+    processor, model = load_whisper_model(args.model_name)
     freeze_base_model(model)
 
-    # Inject adapters
-    inserted = inject_adapters_whisper(
-        model, bottleneck_dim=args.bottleneck_dim, scale=args.scale
-    )
-    print(f"Inserted {len(inserted)} adapters.")
+    # 2️⃣ Générer les transcriptions du modèle de base
+    print("📄 Génération des transcriptions du modèle de base...")
+    test_dataset = load_local_dataset(os.path.join(args.data_dir, "metadata.jsonl"), processor, n_samples=args.n_test)
+    base_transcriptions = generate_transcriptions(model, processor, test_dataset, device)
+    save_to_file(base_transcriptions, "base_transcriptions.txt")
 
-    # Train adapters only
+    # 3️⃣ Ajouter les adaptateurs et fine-tuning
+    inserted = inject_adapters_whisper(model, bottleneck_dim=args.bottleneck_dim, scale=args.scale)
+    print(f"Inserted {len(inserted)} adapters.")
     unfreeze_adapters(model)
 
-    # ================================================================
-    #               CHARGEMENT DU MINI DATASET LOCAL
-    # ================================================================
-    dataset = load_local_dataset(args.data_dir)
-    print(f"Dataset local chargé : {len(dataset)} échantillons.")
+    train_dataset = load_local_dataset(os.path.join(args.data_dir, "metadata.jsonl"), processor, n_samples=args.n_train)
+    dataloader = DataLoader(train_dataset, batch_size=args.batch_size, collate_fn=collate_fn, shuffle=True)
 
-    # ================================================================
-    #                     PRÉPROCESSING (HF)
-    # ================================================================
-    def map_fn(x):
-        return prepare_dataset(x, processor)
+    trainable_parameters = [p for p in model.parameters() if p.requires_grad]
+    print("Trainable params:", sum(p.numel() for p in trainable_parameters))
 
-    dataset = dataset.map(
-        map_fn,
-        remove_columns=dataset.column_names,
-        desc="Préparation dataset"
-    )
-
-    # DataLoader
-    dataloader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        collate_fn=collate_fn,
-    )
-
-    # Optimizer
-    trainable = [p for p in model.parameters() if p.requires_grad]
-    print("Paramètres entraînables :", sum(p.numel() for p in trainable))
-
-    optimizer = AdamW(trainable, lr=args.lr)
-
-    num_steps = len(dataloader) * args.num_epochs
+    optimizer = AdamW(trainable_parameters, lr=args.lr)
     scheduler = get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=50,
-        num_training_steps=num_steps
+        optimizer, num_warmup_steps=50, num_training_steps=len(dataloader)*args.num_epochs
     )
 
     model.train()
     model.to(device)
 
-    # ================================================================
-    #                       TRAIN LOOP
-    # ================================================================
+    print("🚀 Début du fine-tuning des adaptateurs...")
     for epoch in range(args.num_epochs):
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
-
         for batch in pbar:
             input_feats = batch["input_features"].to(device)
             labels = batch["labels"].to(device)
-
-            outputs = model(
-                input_features=input_feats,
-                labels=labels
-            )
+            outputs = model(input_features=input_feats, labels=labels)
             loss = outputs.loss
-
             loss.backward()
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
-
             pbar.set_postfix({"loss": loss.item()})
 
-    # ================================================================
-    #               SAVE ADAPTER WEIGHTS
-    # ================================================================
+    # 4️⃣ Sauvegarder les adaptateurs
     os.makedirs(args.adapter_dir, exist_ok=True)
+    adapter_state = {n: p.detach().cpu() for n, p in model.named_parameters() if p.requires_grad}
+    adapter_path = os.path.join(args.adapter_dir, "adapter_weights.pth")
+    torch.save(adapter_state, adapter_path)
+    print("✅ Saved adapters to", adapter_path)
 
-    adapter_state = {
-        n: p.detach().cpu()
-        for n, p in model.named_parameters()
-        if p.requires_grad
-    }
+    # 5️⃣ Générer les transcriptions du modèle affiné
+    print("📄 Génération des transcriptions du modèle affiné...")
+    finetuned_transcriptions = generate_transcriptions(model, processor, test_dataset, device)
+    save_to_file(finetuned_transcriptions, "finetuned_transcriptions.txt")
 
-    save_path = os.path.join(args.adapter_dir, "adapter_weights.pth")
-    torch.save(adapter_state, save_path)
-
-    print("Adaptateurs enregistrés dans :", save_path)
-
-
+# ------------------------
+# Entrée principale
+# ------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", default="data")   # 🔥 ton dataset local
     parser.add_argument("--model_name", default="openai/whisper-small")
-    parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--num_epochs", type=int, default=2)
+    parser.add_argument("--data_dir", default="/content/drive/MyDrive/ASR_dataset")
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--bottleneck_dim", type=int, default=64)
     parser.add_argument("--scale", type=float, default=1.0)
-    parser.add_argument("--adapter_dir", default="/kaggle/working")
+    parser.add_argument("--adapter_dir", default="./adapters")
     parser.add_argument("--seed", type=int, default=42)
-
+    parser.add_argument("--n_train", type=int, default=50, help="Nombre d'échantillons pour l'entraînement")
+    parser.add_argument("--n_test", type=int, default=20, help="Nombre d'échantillons pour test")
     args = parser.parse_args()
     train(args)
