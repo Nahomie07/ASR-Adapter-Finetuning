@@ -1,5 +1,6 @@
 import tarfile
 import os
+import tempfile
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
@@ -10,33 +11,31 @@ from dataset import prepare_dataset
 from utils import set_seed
 from tqdm.auto import tqdm
 import argparse
-import json
 
 class AudioShardDataset(Dataset):
+    """Dataset qui lit directement depuis un tarball audio"""
     def __init__(self, tar_path, processor, n_samples=None):
-        self.samples = []
         self.processor = processor
+        self.samples = []
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.tar_path = tar_path
+
+        # Extraire temporairement les fichiers audio
         with tarfile.open(tar_path, "r") as tar:
-            members = tar.getmembers()
+            members = [m for m in tar.getmembers() if m.isfile() and m.name.endswith((".webm", ".wav"))]
             if n_samples:
                 members = members[:n_samples]
             for m in members:
-                if m.isfile() and m.name.endswith(".webm"):  # ou .wav selon ton dataset
-                    f = tar.extractfile(m)
-                    # On peut sauvegarder temporairement ou lire en mémoire
-                    # Ici on garde juste le path et l'associe à un label fictif
-                    self.samples.append({"audio_file": m.name})
+                extracted_path = os.path.join(self.temp_dir.name, os.path.basename(m.name))
+                with open(extracted_path, "wb") as f_out:
+                    f_out.write(tar.extractfile(m).read())
+                self.samples.append({"audio_filepath": extracted_path, "labels": [0]})  # labels dummy si besoin
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        sample = self.samples[idx]
-        # Ici on lirait le fichier audio et on prépare les features
-        # Pour l'exemple on simule prepare_dataset
-        # prepare_dataset devrait prendre {"audio_filepath": ...}
-        data = {"audio_filepath": sample["audio_file"], "labels": [0]}  # dummy labels
-        return prepare_dataset(data, self.processor)
+        return prepare_dataset(self.samples[idx], self.processor)
 
 def freeze_base_model(model):
     for p in model.parameters():
@@ -60,11 +59,11 @@ def train(args):
 
     processor, model = load_whisper_model(args.model_name)
     freeze_base_model(model)
+
     inserted = inject_adapters_whisper(model, bottleneck_dim=args.bottleneck_dim, scale=args.scale)
     print(f"Inserted {len(inserted)} adapters.")
     unfreeze_adapters(model)
 
-    # Charger dataset à partir du tarball
     dataset = AudioShardDataset(args.audio_shard, processor, n_samples=args.n_train)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, collate_fn=collate_fn, shuffle=True)
 
@@ -92,6 +91,9 @@ def train(args):
     adapter_state = {n: p.detach().cpu() for n, p in model.named_parameters() if p.requires_grad}
     torch.save(adapter_state, os.path.join(args.adapter_dir, "adapter_weights.pth"))
     print("Saved adapters to", os.path.join(args.adapter_dir, "adapter_weights.pth"))
+
+    # Cleanup temporaire
+    dataset.temp_dir.cleanup()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
