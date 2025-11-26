@@ -1,5 +1,5 @@
-import tarfile
 import os
+import tarfile
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
@@ -10,15 +10,19 @@ from dataset import prepare_dataset
 from utils import set_seed
 from tqdm.auto import tqdm
 import argparse
+import torchaudio
 
+# ------------------------
+# Dataset à partir d'un tarball
+# ------------------------
 class AudioShardDataset(Dataset):
-    """Dataset pour charger les fichiers audio depuis un tarball"""
     def __init__(self, tar_path, processor, n_samples=None):
         self.samples = []
         self.processor = processor
         self.temp_dir = "temp_audio"
         os.makedirs(self.temp_dir, exist_ok=True)
 
+        # Extraire les fichiers du tarball
         with tarfile.open(tar_path, "r") as tar:
             members = [m for m in tar.getmembers() if m.isfile() and m.name.endswith((".webm", ".wav"))]
             if n_samples:
@@ -26,16 +30,25 @@ class AudioShardDataset(Dataset):
             for m in members:
                 tar.extract(m, path=self.temp_dir)
                 audio_path = os.path.join(self.temp_dir, m.name)
-                # On simule un label vide pour le moment
-                self.samples.append({"audio_filepath": audio_path, "text": "dummy text"})
+                self.samples.append({"audio_filepath": audio_path, "text": "dummy text"})  # texte dummy
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
+        # Charger l'audio
+        waveform, sr = torchaudio.load(sample["audio_filepath"])
+        # Resampler si nécessaire
+        if sr != 16000:
+            resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
+            waveform = resampler(waveform)
+        sample["input_values"] = waveform.squeeze().numpy()
         return prepare_dataset(sample, self.processor)
 
+# ------------------------
+# Fonctions utilitaires
+# ------------------------
 def freeze_base_model(model):
     for p in model.parameters():
         p.requires_grad = False
@@ -52,20 +65,23 @@ def collate_fn(batch):
     labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=-100)
     return {"input_features": input_feats, "labels": labels}
 
+# ------------------------
+# Entraînement
+# ------------------------
 def train(args):
     set_seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Charger Whisper
+    # Charger modèle
     processor, model = load_whisper_model(args.model_name)
     freeze_base_model(model)
 
-    # Injecter les adaptateurs
+    # Ajouter adaptateurs
     inserted = inject_adapters_whisper(model, bottleneck_dim=args.bottleneck_dim, scale=args.scale)
     print(f"Inserted {len(inserted)} adapters.")
     unfreeze_adapters(model)
 
-    # Charger le dataset depuis le tar
+    # Dataset
     dataset = AudioShardDataset(args.audio_shard, processor, n_samples=args.n_train)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, collate_fn=collate_fn, shuffle=True)
 
@@ -74,7 +90,9 @@ def train(args):
         optimizer, num_warmup_steps=50, num_training_steps=len(dataloader)*args.num_epochs
     )
 
-    model.train().to(device)
+    model.train()
+    model.to(device)
+
     for epoch in range(args.num_epochs):
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
         for batch in pbar:
@@ -88,16 +106,19 @@ def train(args):
             optimizer.zero_grad()
             pbar.set_postfix({"loss": loss.item()})
 
-    # Sauvegarder les adaptateurs
+    # Sauvegarder adaptateurs
     os.makedirs(args.adapter_dir, exist_ok=True)
     adapter_state = {n: p.detach().cpu() for n, p in model.named_parameters() if p.requires_grad}
     torch.save(adapter_state, os.path.join(args.adapter_dir, "adapter_weights.pth"))
     print("Saved adapters to", os.path.join(args.adapter_dir, "adapter_weights.pth"))
 
+# ------------------------
+# Entrée principale
+# ------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", default="openai/whisper-small")
-    parser.add_argument("--audio_shard", required=True, help="Chemin vers le tarball contenant l'audio")
+    parser.add_argument("--audio_shard", required=True, help="Chemin vers le tarball audio")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=3e-4)
