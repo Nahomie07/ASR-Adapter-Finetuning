@@ -29,21 +29,26 @@ et n'utilise qu'une fraction de l'espace disque Kaggle.
 
 
 def download_metadata(index_url, n):
-    """
-    Télécharge uniquement les N premières lignes du metadata.jsonl
-    depuis HuggingFace, sans télécharger tout le dataset.
-    """
     print(f"📥 Téléchargement des {n} entrées metadata...")
 
     samples = []
-    with requests.get(index_url, stream=True) as r:
-        for line in r.iter_lines():
-            if line:
-                sample = json.loads(line)
-                samples.append(sample)
+    with requests.get(index_url, stream=True, headers={"Accept": "application/json"}) as r:
+        for raw_line in r.iter_lines(decode_unicode=True):
+            if not raw_line:
+                continue
 
-                if len(samples) >= n:
-                    break
+            if not raw_line.startswith("{"):  # Évite HTML ou lignes vides
+                continue
+
+            try:
+                sample = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue  # ignore mauvaise ligne
+
+            samples.append(sample)
+            if len(samples) >= n:
+                break
+
     return samples
 
 
