@@ -1,55 +1,46 @@
 import os
 import json
-import requests
 from tqdm.auto import tqdm
+from huggingface_hub import hf_hub_download
 import argparse
+import requests
+
 
 """
 ====================================================
-   BUILD MINI DATASET FOR KAGGLE (FINAL + WORKING)
+    MINI DATASET (VERSION FINALE + FIABLE)
 ====================================================
-
-Télécharge seulement N échantillons du dataset
-Digital Umuganda ASR Fellowship Challenge sans
-récupérer les 57 Go complets.
-
-Fonctionne dans Kaggle.
+Télécharge le fichier metadata.jsonl via l’API HF,
+puis sélectionne N entrées et récupère les fichiers audio.
 """
 
 
-# ----------------------------------------------------------- #
-#     URL DIRECTE QUI FONCTIONNE (non-LFS, non-HTML)          #
-# ----------------------------------------------------------- #
-METADATA_URL = (
-    "https://huggingface.co/datasets/DigitalUmuganda/"
-    "ASR_Fellowship_Challenge_Dataset/resolve/main/data/train/metadata.jsonl?download=1"
-)
+REPO_ID = "DigitalUmuganda/ASR_Fellowship_Challenge_Dataset"
+METADATA_FILE = "data/train/metadata.jsonl"
 
 
-def download_metadata(n):
-    print(f"📥 Téléchargement des {n} entrées metadata...")
+def load_metadata_local(n):
+    print(f"📥 Téléchargement du metadata.jsonl via HuggingFace Hub…")
+
+    metadata_path = hf_hub_download(
+        repo_id=REPO_ID,
+        filename=METADATA_FILE,
+        repo_type="dataset"
+    )
+
+    print("➡️  Fichier metadata récupéré :", metadata_path)
 
     samples = []
-    r = requests.get(METADATA_URL, stream=True)
+    with open(metadata_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            sample = json.loads(line)
+            samples.append(sample)
+            if len(samples) >= n:
+                break
 
-    for raw in r.iter_lines(decode_unicode=True):
-        if not raw:
-            continue
-
-        # On ignore tout ce qui n’est pas JSON
-        if not raw.strip().startswith("{"):
-            continue
-
-        try:
-            sample = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-
-        samples.append(sample)
-        if len(samples) >= n:
-            break
-
-    print(f"➡️  {len(samples)} entrées valides récupérées.")
+    print(f"➡️  {len(samples)} entrées chargées.")
     return samples
 
 
@@ -60,8 +51,8 @@ def download_audio(samples, audio_dir):
 
     for s in tqdm(samples):
         url = s["audio"]["path"]
-        local_name = os.path.basename(url)
-        out_path = os.path.join(audio_dir, local_name)
+        filename = os.path.basename(url)
+        out_path = os.path.join(audio_dir, filename)
 
         if os.path.exists(out_path):
             s["audio"]["path"] = out_path
@@ -70,8 +61,7 @@ def download_audio(samples, audio_dir):
         r = requests.get(url, stream=True)
         with open(out_path, "wb") as f:
             for chunk in r.iter_content(8192):
-                if chunk:
-                    f.write(chunk)
+                f.write(chunk)
 
         s["audio"]["path"] = out_path
 
@@ -91,26 +81,24 @@ def main(args):
     audio_dir = os.path.join(data_dir, "audio")
     os.makedirs(data_dir, exist_ok=True)
 
-    # 1) Télécharger N lignes du metadata.jsonl
-    samples = download_metadata(args.n)
+    # 1) Charger N lignes locales via HF Hub
+    samples = load_metadata_local(args.n)
 
-    # 2) Télécharger les audios
+    # 2) Télécharger les fichiers audio correspondants
     samples = download_audio(samples, audio_dir)
 
-    # 3) Sauvegarder metadata.jsonl local
+    # 3) Sauvegarder le metadata corrigé (chemins locaux)
     metadata_path = os.path.join(data_dir, "metadata.jsonl")
     save_metadata(samples, metadata_path)
 
-    print("✅ Mini dataset complet et prêt pour l'entraînement !")
+    print("✅ Mini dataset prêt !")
     print(f"📁 Dossier : {data_dir}")
-    print(f"📦 Nombre d'échantillons finaux : {len(samples)}")
+    print(f"📦 Nombre d’échantillons finaux : {len(samples)}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--n", type=int, default=300,
-                        help="Nombre d'échantillons à télécharger")
-    parser.add_argument("--data_dir", default="data",
-                        help="Dossier de sortie du dataset local")
+    parser.add_argument("--n", type=int, default=300)
+    parser.add_argument("--data_dir", default="data")
     args = parser.parse_args()
     main(args)
