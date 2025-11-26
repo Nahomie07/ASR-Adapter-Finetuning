@@ -23,16 +23,23 @@ def speech_file_to_array_fn(batch, path_prefix="", audio_column="audio_filepath"
     return {"speech": waveform.squeeze(0).numpy(), "sampling_rate": SAMPLE_RATE}
 
 def prepare_dataset(sample, processor):
-    # Charger l'audio
     import torchaudio
+
+    # Charger l'audio
     waveform, sr = torchaudio.load(sample["audio_filepath"])
-    
-    # Features audio
+
+    # Resampler si nécessaire (Whisper attend 16kHz)
+    if sr != 16000:
+        resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
+        waveform = resampler(waveform)
+
+    # Features audio (input_values)
     input_features = processor.feature_extractor(
-        waveform.squeeze(0), sampling_rate=sr, return_tensors="pt"
+        waveform.squeeze(0), sampling_rate=16000, return_tensors="pt"
     ).input_features.squeeze(0)
-    
+
     # Labels texte
-    labels = processor.tokenizer(sample["text"], return_tensors="pt").input_ids.squeeze(0)
-    
+    labels = processor.tokenizer(sample.get("text", ""), return_tensors="pt").input_ids.squeeze(0)
+
     return {"input_features": input_features, "labels": labels}
+
