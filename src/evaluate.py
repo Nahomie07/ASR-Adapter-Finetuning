@@ -1,9 +1,33 @@
 import torch
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
-from datasets import load_dataset
 from jiwer import wer
 from tqdm import tqdm
+import tarfile
+import torchaudio
+import argparse
 import os
+
+class AudioShardDataset:
+    """Dataset pour lire un tarball d'audio avec labels fictifs (ou réels si disponibles)."""
+    def __init__(self, tar_path, n_samples=None):
+        self.samples = []
+        self.tar_path = tar_path
+        self.tar = tarfile.open(tar_path, "r")
+        members = [m for m in self.tar.getmembers() if m.isfile() and m.name.endswith(".webm")]
+        if n_samples:
+            members = members[:n_samples]
+        for m in members:
+            self.samples.append(m.name)
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        member = self.samples[idx]
+        f = self.tar.extractfile(member)
+        # Sauvegarde temporaire dans RAM
+        waveform, sr = torchaudio.load(f)
+        return {"waveform": waveform.squeeze(0), "sr": sr, "audio_name": member}
 
 def load_base_model(model_name="openai/whisper-small", device="cuda"):
     processor = WhisperProcessor.from_pretrained(model_name)
