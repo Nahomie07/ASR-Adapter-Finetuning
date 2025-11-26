@@ -1,0 +1,11 @@
+torch>=2.0.0
+torchaudio>=2.0.0
+transformers>=4.35.0
+datasets>=2.10.0
+soundfile
+jiwer
+tqdm
+numpy
+pyyaml
+optuna
+accelerate
