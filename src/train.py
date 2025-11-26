@@ -68,17 +68,17 @@ def train(args):
     set_seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # 1️⃣ Charger le modèle de base
+    #  Charger le modèle de base
     processor, model = load_whisper_model(args.model_name)
     freeze_base_model(model)
 
-    # 2️⃣ Générer les transcriptions du modèle de base
+    #Générer les transcriptions du modèle de base
     print("📄 Génération des transcriptions du modèle de base...")
     test_dataset = load_local_dataset(os.path.join(args.data_dir, "metadata.jsonl"), processor, n_samples=args.n_test)
     base_transcriptions = generate_transcriptions(model, processor, test_dataset, device)
     save_to_file(base_transcriptions, "base_transcriptions.txt")
 
-    # 3️⃣ Ajouter les adaptateurs et fine-tuning
+    #  Ajouter les adaptateurs et fine-tuning
     inserted = inject_adapters_whisper(model, bottleneck_dim=args.bottleneck_dim, scale=args.scale)
     print(f"Inserted {len(inserted)} adapters.")
     unfreeze_adapters(model)
@@ -111,14 +111,14 @@ def train(args):
             optimizer.zero_grad()
             pbar.set_postfix({"loss": loss.item()})
 
-    # 4️⃣ Sauvegarder les adaptateurs
+    #  Sauvegarder les adaptateurs
     os.makedirs(args.adapter_dir, exist_ok=True)
     adapter_state = {n: p.detach().cpu() for n, p in model.named_parameters() if p.requires_grad}
     adapter_path = os.path.join(args.adapter_dir, "adapter_weights.pth")
     torch.save(adapter_state, adapter_path)
-    print("✅ Saved adapters to", adapter_path)
+    print(" Saved adapters to", adapter_path)
 
-    # 5️⃣ Générer les transcriptions du modèle affiné
+    # Générer les transcriptions du modèle affiné
     print("📄 Génération des transcriptions du modèle affiné...")
     finetuned_transcriptions = generate_transcriptions(model, processor, test_dataset, device)
     save_to_file(finetuned_transcriptions, "finetuned_transcriptions.txt")
