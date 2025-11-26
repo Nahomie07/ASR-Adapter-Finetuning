@@ -1,92 +1,162 @@
 import torch
-from transformers import WhisperProcessor, WhisperForConditionalGeneration
-from jiwer import wer
-from tqdm import tqdm
-import os
 import torchaudio
+import tarfile
+from transformers import WhisperProcessor, WhisperForConditionalGeneration
+from tqdm import tqdm
+import argparse
 
-def load_base_model(model_name="openai/whisper-small", device="cuda"):
+class AudioShardDataset:
+    """Dataset pour lire les fichiers audio directement depuis un tarball"""
+    def __init__(self, tar_path, processor, n_samples=None):
+        self.processor = processor
+        self.tar_path = tar_path
+        self.tar = tarfile.open(tar_path, "r")
+        members = [m for m in self.tar.getmembers() if m.isfile() and m.name.endswith(".webm")]
+        if n_samples:
+            members = members[:n_samples]
+        self.members = members
+
+    def __len__(self):
+        return len(self.members)
+
+    def __getitem__(self, idx):
+        member = self.members[idx]
+        f = self.tar.extractfile(member)
+        waveform, sr = torchaudio.load(f)
+        if sr != 16000:
+            waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
+        waveform = waveform.squeeze(0).numpy()
+        input_features = self.processor.feature_extractor(
+            waveform, sampling_rate=16000, return_tensors="pt"
+        ).input_features.squeeze(0)
+        return {"input_features": input_features, "audio_name": member.name}
+
+def load_model(model_name="openai/whisper-small", device="cuda"):
     processor = WhisperProcessor.from_pretrained(model_name)
     model = WhisperForConditionalGeneration.from_pretrained(model_name)
     model.to(device)
     model.eval()
     return processor, model
 
-def generate_transcriptions(processor, model, dataset, adapter_weights_path=None, device="cuda", output_path="transcriptions.txt"):
-    if adapter_weights_path:
-        adapter_state = torch.load(adapter_weights_path, map_location="cpu")
-        model_state = model.state_dict()
-        for k, v in adapter_state.items():
-            if k in model_state:
-                model_state[k] = v
-        model.load_state_dict(model_state, strict=False)
-        print("Loaded adapter weights.")
+def load_adapter(model, adapter_path):
+    adapter_state = torch.load(adapter_path, map_location="cpu")
+    model_state = model.state_dict()
+    for k, v in adapter_state.items():
+        if k in model_state:
+            model_state[k] = v
+    model.load_state_dict(model_state, strict=False)
+    print(f"✅ Adapter loaded from {adapter_path}")
 
+def generate_transcriptions(dataset, processor, model, device="cuda", output_path="transcriptions.txt"):
     model.to(device)
     model.eval()
+    results = []
 
-    lines = []
-    refs = []
+    for item in tqdm(dataset, desc="Generating"):
+        inputs = item["input_features"].unsqueeze(0).to(device)
+        generated_ids = model.generate(inputs)
+        transcription = processor.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        results.append(f"{item['audio_name']}\t{transcription.strip()}")
 
-    for item in tqdm(dataset):
-        audio_path = item["audio_filepath"]
-        text_ref = item.get("text", "")  # support pour dummy labels si nécessaire
-        wav, sr = torchaudio.load(audio_path)
-        if sr != 16000:
-            wav = torchaudio.transforms.Resample(sr, 16000)(wav)
-        wav = wav.squeeze(0).numpy()
-        inputs = processor.feature_extractor(wav, sampling_rate=16000, return_tensors="pt")
-        input_features = inputs["input_features"].to(device)
-        generated_tokens = model.generate(input_features)
-        transcription = processor.tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
-        lines.append(transcription.strip())
-        refs.append(text_ref.strip())
-
-    # Sauvegarde des transcriptions
     with open(output_path, "w", encoding="utf-8") as f:
-        for l in lines:
-            f.write(l + "\n")
-
-    return lines, refs
+        for line in results:
+            f.write(line + "\n")
+    print(f"📄 Transcriptions saved to {output_path}")
 
 if __name__ == "__main__":
-    import argparse
-    import json
-
     parser = argparse.ArgumentParser()
+    parser.add_argument("--audio_shard", required=True, help="Chemin vers le tarball contenant l'audio")
     parser.add_argument("--model_name", default="openai/whisper-small")
-    parser.add_argument("--adapter_path", default=None)
-    parser.add_argument("--audio_dir", required=True, help="Chemin vers le dossier contenant les fichiers audio")
-    parser.add_argument("--labels_file", default=None, help="Fichier JSON ou JSONL contenant les textes (optionnel)")
+    parser.add_argument("--adapter_path", default=None, help="Chemin vers les poids adaptateurs")
+    parser.add_argument("--n_samples", type=int, default=None, help="Nombre d'échantillons à traiter")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--out", default="transcriptions.txt")
+    parser.add_argument("--out", default="transcriptions.txt", help="Fichier de sortie")
     args = parser.parse_args()
 
-    # Construire le dataset local
-    dataset = []
-    audio_files = [f for f in os.listdir(args.audio_dir) if f.endswith(".webm") or f.endswith(".wav")]
-    audio_files.sort()  # pour reproductibilité
-    labels = {}
-    if args.labels_file:
-        with open(args.labels_file, "r", encoding="utf-8") as f:
-            for line in f:
-                entry = json.loads(line)
-                labels[entry["audio_filepath"]] = entry.get("text", "")
+    processor, model = load_model(args.model_name, device=args.device)
+    if args.adapter_path:
+        load_adapter(model, args.adapter_path)
 
-    for audio_file in audio_files:
-        dataset.append({
-            "audio_filepath": os.path.join(args.audio_dir, audio_file),
-            "text": labels.get(audio_file, "")  # vide si pas de fichier de labels
-        })
+    dataset = AudioShardDataset(args.audio_shard, processor, n_samples=args.n_samples)
+    generate_transcriptions(dataset, processor, model, device=args.device, output_path=args.out)
+import torch
+import torchaudio
+import tarfile
+from transformers import WhisperProcessor, WhisperForConditionalGeneration
+from tqdm import tqdm
+import argparse
 
-    processor, model = load_base_model(args.model_name, device=args.device)
-    generated, refs = generate_transcriptions(
-        processor, model, dataset, adapter_weights_path=args.adapter_path,
-        device=args.device, output_path=args.out
-    )
+class AudioShardDataset:
+    """Dataset pour lire les fichiers audio directement depuis un tarball"""
+    def __init__(self, tar_path, processor, n_samples=None):
+        self.processor = processor
+        self.tar_path = tar_path
+        self.tar = tarfile.open(tar_path, "r")
+        members = [m for m in self.tar.getmembers() if m.isfile() and m.name.endswith(".webm")]
+        if n_samples:
+            members = members[:n_samples]
+        self.members = members
 
-    if any(refs):
-        WER = wer(refs, generated)
-        print("WER:", WER)
-    else:
-        print("Pas de références disponibles pour calculer le WER.")
+    def __len__(self):
+        return len(self.members)
+
+    def __getitem__(self, idx):
+        member = self.members[idx]
+        f = self.tar.extractfile(member)
+        waveform, sr = torchaudio.load(f)
+        if sr != 16000:
+            waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
+        waveform = waveform.squeeze(0).numpy()
+        input_features = self.processor.feature_extractor(
+            waveform, sampling_rate=16000, return_tensors="pt"
+        ).input_features.squeeze(0)
+        return {"input_features": input_features, "audio_name": member.name}
+
+def load_model(model_name="openai/whisper-small", device="cuda"):
+    processor = WhisperProcessor.from_pretrained(model_name)
+    model = WhisperForConditionalGeneration.from_pretrained(model_name)
+    model.to(device)
+    model.eval()
+    return processor, model
+
+def load_adapter(model, adapter_path):
+    adapter_state = torch.load(adapter_path, map_location="cpu")
+    model_state = model.state_dict()
+    for k, v in adapter_state.items():
+        if k in model_state:
+            model_state[k] = v
+    model.load_state_dict(model_state, strict=False)
+    print(f"✅ Adapter loaded from {adapter_path}")
+
+def generate_transcriptions(dataset, processor, model, device="cuda", output_path="transcriptions.txt"):
+    model.to(device)
+    model.eval()
+    results = []
+
+    for item in tqdm(dataset, desc="Generating"):
+        inputs = item["input_features"].unsqueeze(0).to(device)
+        generated_ids = model.generate(inputs)
+        transcription = processor.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        results.append(f"{item['audio_name']}\t{transcription.strip()}")
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        for line in results:
+            f.write(line + "\n")
+    print(f"📄 Transcriptions saved to {output_path}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--audio_shard", required=True, help="Chemin vers le tarball contenant l'audio")
+    parser.add_argument("--model_name", default="openai/whisper-small")
+    parser.add_argument("--adapter_path", default=None, help="Chemin vers les poids adaptateurs")
+    parser.add_argument("--n_samples", type=int, default=None, help="Nombre d'échantillons à traiter")
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--out", default="transcriptions.txt", help="Fichier de sortie")
+    args = parser.parse_args()
+
+    processor, model = load_model(args.model_name, device=args.device)
+    if args.adapter_path:
+        load_adapter(model, args.adapter_path)
+
+    dataset = AudioShardDataset(args.audio_shard, processor, n_samples=args.n_samples)
+    generate_transcriptions(dataset, processor, model, device=args.device, output_path=args.out)
