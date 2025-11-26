@@ -1,7 +1,8 @@
 import os
 import torch
 from torch.utils.data import DataLoader
-from transformers import AdamW, get_linear_schedule_with_warmup
+from transformers import get_linear_schedule_with_warmup
+from torch.optim import AdamW 
 from hf_utils import load_whisper_model
 from adapters import inject_adapters_whisper
 from dataset import prepare_dataset
