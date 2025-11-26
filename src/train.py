@@ -129,7 +129,7 @@ def train(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", default="openai/whisper-small")
-    parser.add_argument("--data_dir", default="/content/drive/MyDrive/ASR_dataset")
+    parser.add_argument("--data_dir", default="/kaggle/working/partial_dataset")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=3e-4)
