@@ -6,21 +6,12 @@ import argparse
 import requests
 
 
-"""
-====================================================
-    MINI DATASET (VERSION FINALE + FIABLE)
-====================================================
-Télécharge le fichier metadata.jsonl via l’API HF,
-puis sélectionne N entrées et récupère les fichiers audio.
-"""
-
-
 REPO_ID = "DigitalUmuganda/ASR_Fellowship_Challenge_Dataset"
-METADATA_FILE = "data/train/metadata.jsonl"
+METADATA_FILE = "metadata.jsonl"     # <-- CORRECT !
 
 
 def load_metadata_local(n):
-    print(f"📥 Téléchargement du metadata.jsonl via HuggingFace Hub…")
+    print(f"📥 Téléchargement du metadata.jsonl (racine du repo)…")
 
     metadata_path = hf_hub_download(
         repo_id=REPO_ID,
@@ -81,13 +72,9 @@ def main(args):
     audio_dir = os.path.join(data_dir, "audio")
     os.makedirs(data_dir, exist_ok=True)
 
-    # 1) Charger N lignes locales via HF Hub
     samples = load_metadata_local(args.n)
-
-    # 2) Télécharger les fichiers audio correspondants
     samples = download_audio(samples, audio_dir)
 
-    # 3) Sauvegarder le metadata corrigé (chemins locaux)
     metadata_path = os.path.join(data_dir, "metadata.jsonl")
     save_metadata(samples, metadata_path)
 
