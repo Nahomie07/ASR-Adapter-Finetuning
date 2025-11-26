@@ -1,6 +1,5 @@
 import tarfile
 import os
-import tempfile
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
@@ -12,24 +11,25 @@ from utils import set_seed
 from tqdm.auto import tqdm
 import argparse
 
+# ------------------------
+# Dataset à partir d'un tar
+# ------------------------
 class AudioShardDataset(Dataset):
-    """Dataset qui lit directement depuis un tarball audio"""
     def __init__(self, tar_path, processor, n_samples=None):
-        self.processor = processor
         self.samples = []
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.tar_path = tar_path
+        self.processor = processor
+        self.temp_dir = "/tmp/audio_shard"
+        os.makedirs(self.temp_dir, exist_ok=True)
 
-        # Extraire temporairement les fichiers audio
         with tarfile.open(tar_path, "r") as tar:
-            members = [m for m in tar.getmembers() if m.isfile() and m.name.endswith((".webm", ".wav"))]
+            members = tar.getmembers()
             if n_samples:
                 members = members[:n_samples]
             for m in members:
-                extracted_path = os.path.join(self.temp_dir.name, os.path.basename(m.name))
-                with open(extracted_path, "wb") as f_out:
-                    f_out.write(tar.extractfile(m).read())
-                self.samples.append({"audio_filepath": extracted_path, "labels": [0]})  # labels dummy si besoin
+                if m.isfile() and m.name.endswith((".webm", ".wav")):
+                    tar.extract(m, path=self.temp_dir)
+                    filepath = os.path.join(self.temp_dir, m.name)
+                    self.samples.append({"audio_filepath": filepath, "text": ""})  # texte vide si pas fourni
 
     def __len__(self):
         return len(self.samples)
@@ -37,6 +37,9 @@ class AudioShardDataset(Dataset):
     def __getitem__(self, idx):
         return prepare_dataset(self.samples[idx], self.processor)
 
+# ------------------------
+# Fonctions utilitaires
+# ------------------------
 def freeze_base_model(model):
     for p in model.parameters():
         p.requires_grad = False
@@ -53,17 +56,20 @@ def collate_fn(batch):
     labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=-100)
     return {"input_features": input_feats, "labels": labels}
 
+# ------------------------
+# Fonction principale
+# ------------------------
 def train(args):
     set_seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     processor, model = load_whisper_model(args.model_name)
     freeze_base_model(model)
-
     inserted = inject_adapters_whisper(model, bottleneck_dim=args.bottleneck_dim, scale=args.scale)
     print(f"Inserted {len(inserted)} adapters.")
     unfreeze_adapters(model)
 
+    # Charger dataset à partir du tarball
     dataset = AudioShardDataset(args.audio_shard, processor, n_samples=args.n_train)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, collate_fn=collate_fn, shuffle=True)
 
@@ -92,9 +98,9 @@ def train(args):
     torch.save(adapter_state, os.path.join(args.adapter_dir, "adapter_weights.pth"))
     print("Saved adapters to", os.path.join(args.adapter_dir, "adapter_weights.pth"))
 
-    # Cleanup temporaire
-    dataset.temp_dir.cleanup()
-
+# ------------------------
+# Entrée principale
+# ------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", default="openai/whisper-small")
