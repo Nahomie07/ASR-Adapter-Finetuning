@@ -145,7 +145,7 @@ if __name__ == "__main__":
     parser.add_argument("--bottleneck_dim", type=int, default=64)
     parser.add_argument("--scale", type=float, default=1.0)
     parser.add_argument("--adapter_dir", default="/kaggle/working")
-    parser.add_argument("--train_size", type=int, default=2000)
+    parser.add_argument("--train_size", type=int, default=500)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
