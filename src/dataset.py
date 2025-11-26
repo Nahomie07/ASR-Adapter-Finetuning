@@ -22,16 +22,17 @@ def speech_file_to_array_fn(batch, path_prefix="", audio_column="audio_filepath"
         waveform = torch.mean(waveform, dim=0, keepdim=True)
     return {"speech": waveform.squeeze(0).numpy(), "sampling_rate": SAMPLE_RATE}
 
-def prepare_dataset(batch, processor: WhisperProcessor, audio_column="audio_filepath", text_column="text", path_prefix=""):
+def prepare_dataset(sample, processor):
+    # Charger l'audio
     import torchaudio
-    path = batch[audio_column] if path_prefix=="" else os.path.join(path_prefix, batch[audio_column])
-    waveform, sr = torchaudio.load(path)
-    if sr != SAMPLE_RATE:
-        waveform = torchaudio.transforms.Resample(sr, SAMPLE_RATE)(waveform)
-    waveform = waveform.squeeze(0).numpy()
-    inputs = processor.feature_extractor(waveform, sampling_rate=SAMPLE_RATE, return_tensors="pt")
-    with processor.as_target_processor():
-        labels = processor.tokenizer(batch[text_column], return_tensors="pt")
-    input_values = inputs["input_features"][0]
-    label_ids = labels["input_ids"][0]
-    return {"input_features": input_values, "labels": label_ids}
+    waveform, sr = torchaudio.load(sample["audio_filepath"])
+    
+    # Features audio
+    input_features = processor.feature_extractor(
+        waveform.squeeze(0), sampling_rate=sr, return_tensors="pt"
+    ).input_features.squeeze(0)
+    
+    # Labels texte
+    labels = processor.tokenizer(sample["text"], return_tensors="pt").input_ids.squeeze(0)
+    
+    return {"input_features": input_features, "labels": labels}
