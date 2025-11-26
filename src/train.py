@@ -1,8 +1,7 @@
-import os
-import json
 import tarfile
+import os
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 from transformers import get_linear_schedule_with_warmup
 from hf_utils import load_whisper_model
@@ -11,10 +10,34 @@ from dataset import prepare_dataset
 from utils import set_seed
 from tqdm.auto import tqdm
 import argparse
+import json
 
-# ------------------------
-# Fonctions utilitaires
-# ------------------------
+class AudioShardDataset(Dataset):
+    def __init__(self, tar_path, processor, n_samples=None):
+        self.samples = []
+        self.processor = processor
+        with tarfile.open(tar_path, "r") as tar:
+            members = tar.getmembers()
+            if n_samples:
+                members = members[:n_samples]
+            for m in members:
+                if m.isfile() and m.name.endswith(".webm"):  # ou .wav selon ton dataset
+                    f = tar.extractfile(m)
+                    # On peut sauvegarder temporairement ou lire en mémoire
+                    # Ici on garde juste le path et l'associe à un label fictif
+                    self.samples.append({"audio_file": m.name})
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        # Ici on lirait le fichier audio et on prépare les features
+        # Pour l'exemple on simule prepare_dataset
+        # prepare_dataset devrait prendre {"audio_filepath": ...}
+        data = {"audio_filepath": sample["audio_file"], "labels": [0]}  # dummy labels
+        return prepare_dataset(data, self.processor)
+
 def freeze_base_model(model):
     for p in model.parameters():
         p.requires_grad = False
@@ -31,89 +54,27 @@ def collate_fn(batch):
     labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=-100)
     return {"input_features": input_feats, "labels": labels}
 
-def load_local_dataset(dataset_path, processor, n_samples=None):
-    """Charge le dataset depuis un fichier tar ou JSONL"""
-    samples = []
-    if dataset_path.endswith(".tar"):
-        with tarfile.open(dataset_path, "r") as tar:
-            for member in tar.getmembers():
-                if member.isfile() and member.name.endswith(".json"):
-                    f = tar.extractfile(member)
-                    sample = json.load(f)
-                    sample = prepare_dataset(sample, processor)
-                    samples.append(sample)
-                    if n_samples and len(samples) >= n_samples:
-                        break
-    else:
-        with open(dataset_path, "r", encoding="utf-8") as f:
-            for line in f:
-                sample = json.loads(line)
-                sample = prepare_dataset(sample, processor)
-                samples.append(sample)
-                if n_samples and len(samples) >= n_samples:
-                    break
-    return samples
-
-def generate_transcriptions(model, processor, dataset, device):
-    """Génère des transcriptions à partir du modèle et du dataset"""
-    model.eval()
-    model.to(device)
-    results = []
-    for sample in tqdm(dataset):
-        input_feats = torch.tensor(sample["input_features"], dtype=torch.float32).unsqueeze(0).to(device)
-        with torch.no_grad():
-            outputs = model.generate(input_features=input_feats)
-        transcription = processor.batch_decode(outputs)[0]
-        results.append(transcription)
-    return results
-
-def save_to_file(transcriptions, path):
-    with open(path, "w", encoding="utf-8") as f:
-        for t in transcriptions:
-            f.write(t + "\n")
-    print(f"Saved to {path}")
-
-# ------------------------
-# Fonction principale
-# ------------------------
 def train(args):
     set_seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Charger le modèle de base
     processor, model = load_whisper_model(args.model_name)
     freeze_base_model(model)
-
-    # Générer les transcriptions du modèle de base
-    print("📄 Génération des transcriptions du modèle de base...")
-    test_dataset = load_local_dataset(
-        os.path.join(args.data_dir, "train-00000.tar"), processor, n_samples=args.n_test
-    )
-    base_transcriptions = generate_transcriptions(model, processor, test_dataset, device)
-    save_to_file(base_transcriptions, "base_transcriptions.txt")
-
-    # Ajouter les adaptateurs et fine-tuning
     inserted = inject_adapters_whisper(model, bottleneck_dim=args.bottleneck_dim, scale=args.scale)
     print(f"Inserted {len(inserted)} adapters.")
     unfreeze_adapters(model)
 
-    train_dataset = load_local_dataset(
-        os.path.join(args.data_dir, "train-00000.tar"), processor, n_samples=args.n_train
-    )
-    dataloader = DataLoader(train_dataset, batch_size=args.batch_size, collate_fn=collate_fn, shuffle=True)
+    # Charger dataset à partir du tarball
+    dataset = AudioShardDataset(args.audio_shard, processor, n_samples=args.n_train)
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, collate_fn=collate_fn, shuffle=True)
 
-    trainable_parameters = [p for p in model.parameters() if p.requires_grad]
-    print("Trainable params:", sum(p.numel() for p in trainable_parameters))
-
-    optimizer = AdamW(trainable_parameters, lr=args.lr)
+    optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=50, num_training_steps=len(dataloader)*args.num_epochs
     )
 
     model.train()
     model.to(device)
-
-    print("🚀 Début du fine-tuning des adaptateurs...")
     for epoch in range(args.num_epochs):
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
         for batch in pbar:
@@ -127,33 +88,22 @@ def train(args):
             optimizer.zero_grad()
             pbar.set_postfix({"loss": loss.item()})
 
-    # Sauvegarder les adaptateurs
     os.makedirs(args.adapter_dir, exist_ok=True)
     adapter_state = {n: p.detach().cpu() for n, p in model.named_parameters() if p.requires_grad}
-    adapter_path = os.path.join(args.adapter_dir, "adapter_weights.pth")
-    torch.save(adapter_state, adapter_path)
-    print("Saved adapters to", adapter_path)
+    torch.save(adapter_state, os.path.join(args.adapter_dir, "adapter_weights.pth"))
+    print("Saved adapters to", os.path.join(args.adapter_dir, "adapter_weights.pth"))
 
-    # Générer les transcriptions du modèle affiné
-    print("📄 Génération des transcriptions du modèle affiné...")
-    finetuned_transcriptions = generate_transcriptions(model, processor, test_dataset, device)
-    save_to_file(finetuned_transcriptions, "finetuned_transcriptions.txt")
-
-# ------------------------
-# Entrée principale
-# ------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", default="openai/whisper-small")
-    parser.add_argument("--data_dir", default="/content/drive/MyDrive/ASR_dataset")  # dossier où train-00000.tar se trouve
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--audio_shard", required=True, help="Chemin vers le tarball contenant l'audio")
+    parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--bottleneck_dim", type=int, default=64)
     parser.add_argument("--scale", type=float, default=1.0)
     parser.add_argument("--adapter_dir", default="./adapters")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--n_train", type=int, default=50, help="Nombre d'échantillons pour l'entraînement")
-    parser.add_argument("--n_test", type=int, default=20, help="Nombre d'échantillons pour test")
+    parser.add_argument("--n_train", type=int, default=20)
     args = parser.parse_args()
     train(args)
