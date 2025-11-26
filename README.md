@@ -1,6 +1,6 @@
 # ASR-Adapter-Finetuning (Whisper-small)
 
-Repo generated automatically. Structure:
+Structure:
 - src/: training, evaluation and adapter insertion scripts
 - adapters/: trained adapter weights (output)
 - base_model/: optional snapshot of base model weights
