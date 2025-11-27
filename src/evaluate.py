@@ -6,28 +6,43 @@ import tarfile
 import torchaudio
 import argparse
 import os
+from dataset import prepare_dataset
+from utils import set_seed
 
-class AudioShardDataset:
-    """Dataset pour lire un tarball d'audio avec labels fictifs (ou réels si disponibles)."""
-    def __init__(self, tar_path, n_samples=None):
+
+# ------------------------
+# Dataset à partir d'un tarball
+# ------------------------
+class AudioShardDataset(Dataset):
+    def __init__(self, tar_path, processor, n_samples=None):
         self.samples = []
-        self.tar_path = tar_path
-        self.tar = tarfile.open(tar_path, "r")
-        members = [m for m in self.tar.getmembers() if m.isfile() and m.name.endswith(".webm")]
-        if n_samples:
-            members = members[:n_samples]
-        for m in members:
-            self.samples.append(m.name)
+        self.processor = processor
+        self.temp_dir = "temp_audio"
+        os.makedirs(self.temp_dir, exist_ok=True)
+
+        # Extraire les fichiers du tarball
+        with tarfile.open(tar_path, "r") as tar:
+            members = [m for m in tar.getmembers() if m.isfile() and m.name.endswith((".webm", ".wav"))]
+            if n_samples:
+                members = members[:n_samples]
+            for m in members:
+                tar.extract(m, path=self.temp_dir)
+                audio_path = os.path.join(self.temp_dir, m.name)
+                self.samples.append({"audio_filepath": audio_path, "text": "dummy text"})  # texte dummy
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        member = self.samples[idx]
-        f = self.tar.extractfile(member)
-        # Sauvegarde temporaire dans RAM
-        waveform, sr = torchaudio.load(f)
-        return {"waveform": waveform.squeeze(0), "sr": sr, "audio_name": member}
+        sample = self.samples[idx]
+        # Charger l'audio
+        waveform, sr = torchaudio.load(sample["audio_filepath"])
+        # Resampler si nécessaire
+        if sr != 16000:
+            resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
+            waveform = resampler(waveform)
+        sample["input_values"] = waveform.squeeze().numpy()
+        return prepare_dataset(sample, self.processor)
 
 def load_base_model(model_name="openai/whisper-small", device="cuda"):
     processor = WhisperProcessor.from_pretrained(model_name)
