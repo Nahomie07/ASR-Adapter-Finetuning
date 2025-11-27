@@ -47,6 +47,9 @@ class AudioShardDataset(Dataset):
         sample = self.samples[idx]
 
         waveform, sr = torchaudio.load(sample["audio_filepath"])
+        # Convertir en mono si l'audio est stéréo
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
 
         # Whisper attend 16000Hz
         if sr != 16000:
