@@ -68,14 +68,7 @@ def generate_transcriptions(processor, model, dataset, adapter_weights_path=None
     lines = []
     refs = []
     for item in tqdm(dataset):
-        audio_path = item["input_features"]
-        import torchaudio
-        wav, sr = torchaudio.load(audio_path)
-        if sr != 16000:
-            wav = torchaudio.transforms.Resample(sr, 16000)(wav)
-        wav = wav.squeeze(0).numpy()
-        inputs = processor.feature_extractor(wav, sampling_rate=16000, return_tensors="pt")
-        input_features = inputs["input_features"].to(device)
+        input_features = item["input_features"].to(device)
         generated_tokens = model.generate(input_features)
         transcription = processor.tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
         lines.append(transcription.strip())
