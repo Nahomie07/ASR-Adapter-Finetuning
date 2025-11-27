@@ -4,7 +4,7 @@ Structure:
 - src/: training, evaluation and adapter insertion scripts
 - adapters/: trained adapter weights (output)
 - base_model/: optional snapshot of base model weights
-- docs/: challenge instructions (copied from uploaded PDF)
+- docs/: challenge instructions 
 
 **Quick start**
 1. Install requirements:
