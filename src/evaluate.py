@@ -51,7 +51,7 @@ def generate_transcriptions(processor, model, dataset, adapter_weights_path=None
 
     lines = []
     refs = []
-   for item in tqdm(dataset):
+    for item in tqdm(dataset):
         wav, sr = item["waveform"], item["sr"]
         if sr != 16000:
             wav = torchaudio.transforms.Resample(sr, 16000)(wav.unsqueeze(0)).squeeze(0)
