@@ -18,8 +18,6 @@ def speech_file_to_array_fn(batch, path_prefix="", audio_column="audio_filepath"
     waveform, sr = torchaudio.load(path)
     if sr != SAMPLE_RATE:
         waveform = torchaudio.transforms.Resample(sr, SAMPLE_RATE)(waveform)
-    if waveform.shape[0] > 1:
-        waveform = torch.mean(waveform, dim=0, keepdim=True)
     return {"speech": waveform.squeeze(0).numpy(), "sampling_rate": SAMPLE_RATE}
 
 def prepare_dataset(sample, processor):
