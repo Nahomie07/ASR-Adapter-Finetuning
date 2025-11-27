@@ -14,4 +14,4 @@ Structure:
 3. Evaluate:
    bash run_eval.sh
 
-The uploaded challenge brief was copied into docs/ASR_Fellowship_Challenge_Instructions.pdf
+The challenge brief was into docs/ASR_Fellowship_Challenge_Instructions.pdf
