@@ -173,6 +173,7 @@ if __name__ == "__main__":
         output_path=args.out
     )
 
-    # Tu n'as pas les vrais labels → WER non disponible
-    WER = wer([" "] * len(generated), generated)
+    from jiwer import wer
+    WER = wer(refs, generated)
+    print("WER:", WER)
     print("Évaluation terminée.")
