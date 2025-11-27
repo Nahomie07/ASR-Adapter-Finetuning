@@ -96,9 +96,9 @@ if __name__ == "__main__":
     parser.add_argument("--out", default="transcriptions.txt")
     args = parser.parse_args()
 
+    processor, model = load_base_model(args.model_name, device=args.device)
     #ds = load_dataset(args.dataset_name)[args.split]
     ds = AudioShardDataset(args.tar_path, n_samples=args.n_samples)
-    processor, model = load_base_model(args.model_name, device=args.device)
     generated, refs = generate_transcriptions(processor, model, ds, adapter_weights_path=args.adapter_path, device=args.device, output_path=args.out)
     from jiwer import wer
     WER = wer(refs, generated)
