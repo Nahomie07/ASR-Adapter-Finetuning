@@ -39,6 +39,9 @@ class AudioShardDataset(Dataset):
         sample = self.samples[idx]
         # Charger l'audio
         waveform, sr = torchaudio.load(sample["audio_filepath"])
+        # Convertir en mono si l'audio est stéréo
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
         # Resampler si nécessaire
         if sr != 16000:
             resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
